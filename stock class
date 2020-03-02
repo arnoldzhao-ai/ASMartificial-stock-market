@@ -1,0 +1,41 @@
+import numpy as np
+from scipy import stats
+
+class stock:
+    def __init__(self,discount_rate,initial_div,div_growthRate): #初始化
+        self.discountRate=discount_rate #设定折现率
+        #self.time=time
+        self.rational_expectation_price=[]#理性预期价格是一个数组，记录t时刻的价格序列
+        self.divdend_growthrate=div_growthRate
+        self.initial_divdends=initial_div
+        self.future_div=np.zeros(200) #未来红利序列生成函数，设计一个平稳增长的单位根数列生成未来红利
+       
+    #定义红利生成过程函数
+    def divdends_forming(self):#(initial_divdends,divdend_growthrate):
+        random_disturb=stats.truncnorm.rvs(0,3,loc=1,scale=1,size=200)
+        for i in range(200):
+            #time_i_div=self.initial_divdends*(1+divdend_growthrate)**i
+            self.future_div[i]=(self.initial_divdends+random_disturb[i])*(1+self.divdend_growthrate)**i
+            #print(self.future_div[i])
+        return self.future_div
+    
+    #定义理性价格预期形成函数
+    def calculate_rationalExpectationPrice(self):
+           #红利折现生成当期理性预期价格
+        expectation_t=0.0       # 定义临时变量
+        self.divdends_forming()
+        for n in range(200):
+          #  self.expectation+=(market.discount_factor**n)*self.future_div[n]
+            
+            expectation_t+=(self.discountRate**n)*self.future_div[n]  #t时刻的预期价格
+            #将新的预期价格加入到价格序列中
+        self.rational_expectation_price.append(expectation_t)
+          # self.time+=1
+        #return self.rational_expectation_price
+
+stock1=stock(0.92,1.0,0.05)
+#stock1_divserials=stock1.divdends_forming(1.0,0.05)
+stock1_price=stock1.calculate_rationalExpectationPrice()
+#print(stock1.future_div)
+#print(stock1.divdend_growthrate)
+print(stock1.rational_expectation_price)
