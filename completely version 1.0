@@ -1,1 +1,682 @@
+import numpy as np
+from scipy import stats
+from decimal import Decimal
+import datetime
+import random
+import pymysql
+import sqlalchemy 
+from sqlalchemy import (MetaData,Table,Column,create_engine)
+from sqlalchemy import Integer,String,Float
+from sqlalchemy.sql import select,insert,update,delete
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
+
+start_time=datetime.datetime.now()
+time=0
+tradernumber=100
+time_length=20
+DivGrowthRate=0.04
+
+#生成市场无风险率的时间序列数据
+market_riskfree_serial=stats.truncnorm.rvs(0,0.1,loc=0.03,scale=0.03,size=time_length)
+#转换为float类型，否则作为numpy float64类型写入MySQL数据库时会报错
+market_riskfree_rate_serial=[float(x) for x in market_riskfree_serial]  
+#print(type(market_riskfree_rate_serial[0]))
+
+#生成市场风险溢价时间序列
+market_risk_serial=stats.truncnorm.rvs(0,0.4,loc=0.05,scale=0.03,size=time_length)
+#转换为float类型，否则作为numpy float64类型写入MySQL数据库时会报错
+market_risk_premium_serial=[float(x) for x in market_risk_serial]
+
+
+
+#定义交易者类，继承子类三个，理性交易者和非理性交易者，以及人工智能交易者
+class traders():
+    def __init__(self,account_number,initial_cash,initial_stock,riskPreference):
+        self.account_number=account_number
+        self.cash=initial_cash
+        #self.trader_type=R
+        self.stock=initial_stock #投资者初始股票和现金，以及风险态度
+        #风险偏好溢价用一个随机数生成器生成一个0到0.2之间的数字
+        self.risk_preference=riskPreference#初始使用一个简单的风险溢价，一个数字，随后用引入效用函数
+        self.discount_factor=1-(market_riskfree_rate_serial[time]+self.risk_preference) #可用固定折现率和可变折现率，初始使用固定折现率
+       # print('discount_factor is :',self.discount_factor)
+        
+    def expectation_forming(self,type):
+        #t+n期的红利乘以折现因子的n次方汇总后即为当期股票价格预期         
+        self.trader_expectation_price=0.0
+        #print('the first expectation divdends is:',type.future_div[1])
+        for i in range(200):
+            self.trader_expectation_price+=(self.discount_factor**i)*type.future_div[i]
+        self.trader_expectation_price=round(self.trader_expectation_price,2)
+        #round(trader_expectation_price,2)
+       # print('trader expectation price is:',trader_expectation_price)
+        return self.trader_expectation_price
+     
+    #定义一个效用函数，决定证券的供给和需求  
+    #def utility_func(self):
+        
+    def demand_forming(self,last_market_price):     #定义交易者需求形成函数
+        market_pri=last_market_price
+        current_market_pri=rational_expectation_price[time]
+        #print('current market price is:',current_market_pri)
+        demand_supply_price=(market_pri+self.trader_expectation_price*3)/4
+       # print('trader expected price is:',self.trader_expectation_price)
+        random_disturb=random.uniform(0,0.04)
+        self.demand_supply_tag='p' #任意时刻的需求形成有三类，d代表买入，s代表卖出，p代表什么也不做
+        if self.trader_expectation_price<market_pri*(1-0.005):#如果个人判断前期价格被高估了，则卖出
+            #供给量或者需求量用O'Hara论文中的方法
+            self.demand_supply_quantity=int(round(100*(market_pri-self.trader_expectation_price)/market_pri,0))
+            self.demand_supply_price=round(demand_supply_price*(1+random_disturb),2)
+            self.demand_supply_tag='s'
+        elif self.trader_expectation_price>market_pri*(1+0.005):#如果个人判断当前价格被低估了，则买入
+            
+            self.demand_supply_quantity=int(round(100*(self.trader_expectation_price-market_pri)/market_pri,0))
+            self.demand_supply_price=round(demand_supply_price*(1-random_disturb),2)
+            self.demand_supply_tag='d'
+        
+        else: #如果当前价格和个人预期价格相比没有太大差距，则不操作   
+            self.demand_supply_price=market_pri
+            self.demand_supply_quantity=0
+            self.demand_supply_tag='p'
+            pass
+ 
+   #def saving_withdraw_cash(self,saving_withdraw,cash_amount):
+   #     if saving_withdraw='sv':
+   #         self.cash+=cash_amount
+   #     elif saving_withdraw='wd' and self.cash>=cash_amount:
+   #         self.cash-=cash_amount
+   #     else:
+   #         print('cash is not enough')
+         
+
+#定义风险证券类，目前只有股票，随后可以加入证券
+class stock():
+    def __init__(self,discount_rate,initial_div,div_growthRate): #初始化
+        self.discountRate=discount_rate #设定折现率
+        #self.time=time
+#       self.rational_expectation_price   #理性预期价格是一个数组，记录t时刻的价格序列
+#         initial_price=55.0
+#         self.rational_expectation_price.append(initial_price)
+        self.divdend_growthrate=div_growthRate
+        self.initial_divdends=initial_div
+        self.future_div=np.zeros(200) #未来红利序列生成函数，设计一个平稳增长的单位根数列生成未来红利
+       
+    #定义红利生成过程函数
+    def divdends_forming(self,ex_divdends): #(initial_divdends,divdend_growthrate):
+        random_disturb=stats.truncnorm.rvs(0,3,loc=1,scale=1,size=200)
+        for i in range(200):
+            #time_i_div=self.initial_divdends*(1+divdend_growthrate)**i
+            self.future_div[i]=(ex_divdends+random_disturb[i])*(1+self.divdend_growthrate)**i
+            #print(self.future_div[i])
+        return self.future_div
+    
+    #定义理性价格预期形成函数
+    def calculate_rationalExpectationPrice(self,ex_divdends):
+           #红利折现生成当期理性预期价格
+        expectation_t=0.0       # 定义临时变量
+        self.divdends_forming(ex_divdends)
+        for n in range(200):
+          #  self.expectation+=(market.discount_factor**n)*self.future_div[n]
+            expectation_t+=(self.discountRate**n)*self.future_div[n]  #t时刻的预期价格
+        expectation_t_round=round(expectation_t,2)
+            #将新的预期价格加入到价格序列中
+       # self.rational_expectation_price.append(expectation_t_round)
+          # self.time+=1
+      #  print('the expectation price of stock is:',self.rational_expectation_price,expectation_t_round)
+        return expectation_t_round
+
+def match_demand(demand_list,supply_list):
+    #print('demand list is:',demand_list)
+    #sorted_demand=demand_list[demand_list[:,1].argsort()]
+    sorted_demand=sorted(demand_list,key=lambda demand_price:demand_price[1])
+   # print('sorted demand list is: ',sorted_demand)
+    #print('sorted demand type is:',type(sorted_demand))
+    print('the first column of demand list is:',sorted_demand[0:1])
+    #sorted_supply=supply_list[supply_list[:,1].argsort()]    
+    sorted_supply=sorted(supply_list,key=lambda supply_price:supply_price[1])
+    #print(sorted_supply)
+    total_demand_column=len(demand_list)
+    #print('total demand column is:',total_demand_column)
+    total_supply_column=len(supply_list)
+     #初始化匹配的需求供给量
+    total_demand=0
+    total_supply=0
+    
+    #price_index=0 #指针指向当前价格
+    demand_index=total_demand_column   #指针，指向当前需求方所在的行
+    supply_index=-1                   #指针，指向当前供给方所在的行
+    current_demand=sorted_demand[demand_index-1][2]
+    current_supply=sorted_supply[0][2]
+   
+   # print('current demand,current supply',current_demand,current_supply)
+    net_demand=0
+    current_supply_price=sorted_supply[0][1]
+    current_demand_price=sorted_demand[demand_index-1][1]
+   # equillium_price=demand_list[demand_index-1,1] #初始化均衡价格，为最高的需求价格
+    while True:
+        #print('current demand and supply price:',current_demand_price,';',current_supply_price)
+       # print('current index of demand and supply:',demand_index,';',supply_index)
+        #print('total demand and supply is:',total_demand,';',total_supply)
+        if current_demand_price>=current_supply_price:
+            
+            if net_demand<0:#净需求为负数，需求指针下移一个单位
+                total_demand+=sorted_demand[demand_index][2]
+                if demand_index>=1:
+                    demand_index-=1
+                    current_demand=sorted_demand[demand_index][2]
+                    net_demand+=current_demand
+                else:
+                    equillium_price=current_demand_price
+                    print('demand is reach the max')
+                    break
+       #         print('net demand is:',net_demand)
+            elif net_demand>0:#净需求为正数，供给指针下移一个单位
+                total_supply+=sorted_supply[supply_index][2]
+                if supply_index<=total_supply_column-2:
+                    supply_index+=1
+                    current_supply=sorted_supply[supply_index][2]
+                    net_demand-=current_supply
+                else:
+                    equillium_price=current_demand_price
+                    print('supply is reach the max')
+                    break
+       #         print('net demand is :',net_demand)
+            else: #净需求为零的情况 net_demand=0:
+                if (demand_index>=1) and (supply_index<=total_supply_column-2):
+                    demand_index-=1
+                    supply_index+=1
+                    total_demand+=sorted_demand[demand_index][2]
+                    total_supply+=sorted_supply[supply_index][2]
+                    current_demand=sorted_demand[demand_index][2]
+                    current_supply=sorted_supply[supply_index][2]
+                    net_demand=current_demand-current_supply
+                else:
+                    equillium_price=current_demand_price
+                    print('demand or supply is reach the max')
+                    break
+                              
+         #       print('net demand is :',net_demand)
+          #  print('demand_index and supply index is:',demand_index,supply_index)
+          #  print('supply_index is:',supply_index)
+            current_demand_price=sorted_demand[demand_index][1]
+            current_supply_price=sorted_supply[supply_index][1]
+        else: 
+            equillium_price=current_demand_price
+            break
+           
+       # return total_demand,total_supply
+     #   print('total demand and supply:',total_demand,total_supply)
+      #  print('total supply:',total_supply)
+    total_volume=min(total_demand,total_supply)
+    return equillium_price,total_volume,sorted_demand,sorted_supply
+
+     
+#定义生成交易者的函数
+def trader_generate(traderNumber):
+    trader_number=traderNumber
+    account=[]
+    #print('risk attitude is:',risk_attitude)
+    for i in range(trader_number):
+        account.append(str(60)+str(i))
+    
+    risk_attitude=stats.truncnorm.rvs(0,0.4,loc=0.05,scale=0.03,size=trader_number)#随机生成风险态度
+    risk_attitude=[float(x) for x in risk_attitude]
+    #print(risk_attitude)
+    trader=[traders(account[j],50000.0,1000,risk_attitude[j]) for j in range(trader_number)]
+    return trader
+
+#连接数据库，创建元数据，定义数据库表格结构
+engine=create_engine('mysql+pymysql://root:ArnoldZhao0301@localhost:3306/trader_test?charset=utf8')
+metadata=MetaData()   #创建元数据，用于保存数据库表的目录
+connection=engine.connect()
+#Session=sessionmaker(bind=engine)  #连接数据库并创建Session   
+
+# Base=declarative_base()    #定义一个父类
+#定义交易者的数据库接口类，动态生成一个交易者的表。
+def CreateTradertable(tablename):    #用sqlalchemy中core方法定义表
+    TradersTest=Table(tablename,metadata,
+                      Column('id',Integer(),primary_key=True),
+                      Column('account',String(10),nullable=False),        #primary_key=True )
+                      Column('traderType',String(2),nullable=False),      #交易者类型,理性非理性或者人工智能
+                      Column('riskattitude',Float,nullable=False),        #交易者风险偏好
+                      Column('expectPrice',Float,nullable=True),          #在该期期望的股票价格，由此价格形成需求
+                      Column('cash',Float,nullable=False),                #持有的现金
+                      Column('stock1',Integer,nullable=True),             #持有的股票
+                      Column('dis_factor',Float,nullable=True),           #个人折现因子
+                      Column('BStype',String(1),nullable=True),           #当期买或者卖的标记，为‘d’,'s','p'
+                      Column('tradingrecord',String(10),nullable=True),   #历史交易记录        
+                      Column('bond',Float,nullable=True),                 #持有的债券    
+#                       Column('stock2',Integer,nullable=True),
+#                       Column('stock3',Integer,nullable=True),            
+#                       Column('stock4',Integer,nullable=True),
+#                       Column('stock5',Integer,nullable=True),
+                      Column('tradingVolume',Integer,nullable=True),        #记录当期交易记录，为统计分析做准备
+                      Column('tradingPrice',Float,nullable=True),           #记录当期交易价格
+                      Column('comment',String(500),nullable=True))               
+    return TradersTest
+
+
+class traderdb_operation(object):
+    def __init__(self,object):
+        #初始化匹配的需求供给量
+        self.trading_volume=0
+        self.total_demand=0
+        self.total_supply=0
+        self.actual_vol=0            #记录实际交易量
+            #记录实际交易量
+         #Session=sessionmaker(bind=engine)
+         #self.session=Session()
+    
+    #以下定义一个增加理性交易者的函数    
+    def add_record(self,object,type):
+        add_sql=object.insert()
+        new_record=connection.execute(add_sql,    #查询当前供给方的账号及库存量
+                                       account=type.account_number,
+                                       traderType='ra',
+                                       riskattitude=type.risk_preference,
+                                       cash=type.cash,
+                                       stock1=type.stock,
+                                       disFactor=type.discount_factor
+                                          )
+#         self.session.add(new_record)
+#         self.session.commit()
+        return new_record
+    
+    #以下定义一个增加非理性交易者的函数
+    def add_ir_record(self,object,type):
+        add_ir_sql=object.insert()
+        new_record=connection.execute(add_ir_sql,
+                                     account=type.account_number,
+                                     traderType='ir',
+                                     riskattitude=type.risk_preference,
+                                     cash=type.cash,
+                                     stock1=type.stock,
+                                     dis_factor=type.discount_factor
+                                      )
+        return new_record
+    
+    #以下定义一个增加人工智能交易者的函数
+    def add_ai_record(self,object,type):
+        add_ai_sql=object.insert()
+        new_record=connection.execute(add_ir_sql,
+                          account=type.account_number,
+                          traderType='ai',
+                          riskattitude=type.risk_preference,
+                          cash=type.cash,
+                          stock1=type.stock,
+                          dis_factor=type.discount_factor
+                          )
+#         self.session.add(new_record)
+#         self.session.commit()
+        return new_record
+    
+    def trading(self,clear_price,clear_volume,sorted_demand,sorted_supply,object):
+        trading_volume=0
+        total_demand=0
+        total_supply=0
+        actual_vol=0            #记录实际交易量
+        price=clear_price
+        volume=clear_volume
+        total_demand_column=len(sorted_demand)
+        print('total demand column is:',total_demand_column)
+        total_supply_column=len(sorted_supply)
+        #price_index=0 #指针指向当前价格
+        demand_index=total_demand_column-1   #指针，指向当前需求方所在的行
+        supply_index=0                   #指针，指向当前供给方所在的行
+        print('current demand row is:',demand_index)
+        current_demand=sorted_demand[demand_index][2]
+        current_supply=sorted_supply[0][2]
+       
+        while trading_volume<volume and supply_index<total_supply_column and demand_index>0:
+            current_su_account=sorted_supply[supply_index][0] #记录当前供给方和需求方的账号
+            current_de_account=sorted_demand[demand_index][0] #记录当前供给方和需求方的账号
+                      
+            if current_demand>current_supply: 
+                #如果当前需求大于当前供给，则供给方完成自己的交易，并将供给指针上移一个位置
+                #当前需求方将当前交易量减去，剩余的需求在下一个循环中完成
+                             
+                #查询供给方当前股票库存量，需求方现金量，计算更新供给方和需求方数据库
+                trading_sql=select([object.c.stock1]).where(object.c.account==current_su_account)
+                trading_sql=connection.execute(trading_sql)  #查询当前供给方的账号及库存量    
+                current_supply_vol=trading_sql.first()        #查询出来是对象，需要取出对象中的元素
+                current_supply_vol=current_supply_vol[0]      #求出当前供给量
+                trading_sql=select([object.c.cash]).where(object.c.account==current_de_account)
+                trading_sql=connection.execute(trading_sql)   #查询当前需求方的账号及现金量
+                current_demand_cash=trading_sql.first()       
+                current_demand_cash=current_demand_cash[0]     #同上，求出当前需求方的现金余额
+                demand_quantity=int(current_demand_cash/clear_price)  #查询需求方库存现金能够购买的量
+              #  print('current_supply,current_supply_vol,demand_quantity:',current_supply,current_supply_vol,demand_quantity)
+                current_trading_vol=min(current_supply,current_supply_vol,demand_quantity)  
+                current_stock_value=clear_price*current_trading_vol    #交易价值取当前供给量、需求方现金能力和库存量的较小值
+               # print('the type of current stock value is :',type(current_stock_value))
+            
+                #操作供给方账户，减少股票，增加现金  
+                supply_update=update(object).where(object.c.account==current_su_account)
+                 #在交易者表中股票库存量中减去交易量
+                supply_stock_update=supply_update.values(stock1=(object.c.stock1-current_trading_vol)) 
+                update_stock_supply=connection.execute(supply_stock_update)                       #执行交易语句，写入数据库
+                #supply_cash_update=update(object).where(object.c.account==current_su_account)
+                supply_cash_update=supply_update.values(cash=(object.c.cash+current_stock_value))    #出售股票，现金增加
+                update_supply=connection.execute(supply_cash_update)                       #执行交易语句，写入数据库
+
+                #操作需求方账户，减少现金，增加股票
+                demand_update=update(object).where(object.c.account==current_de_account)
+                demand_cash_update=demand_update.values(cash=(object.c.cash-current_stock_value))    #买入股票，现金减少
+                update_cash_demand=connection.execute(demand_cash_update)                       #执行交易语句，写入数据库
+               # demand_update=update(object).where(object.c.account==current_de_account)
+                #在交易者表中股票库存量中减去交易量      
+                demand_stock_update=demand_update.values(stock1=(object.c.stock1+current_trading_vol))  
+                update_stock_demand=connection.execute(demand_stock_update)                       #执行交易语句，写入数据库
+                
+                current_demand-=current_supply
+                trading_volume+=current_supply
+                actual_vol+=current_trading_vol     #累计实际交易量
+                supply_index+=1
+                current_supply=sorted_supply[supply_index][2]
+                                      
+            elif current_demand<current_supply:  #当前需求量小于供给量
+                #查询供给方当前股票库存量，需求方现金量，计算更新供给方和需求方数据库
+                trading_sql=select([object.c.stock1]).where(object.c.account==current_su_account)
+                trading_sql=connection.execute(trading_sql)    #查询当前供给方的账号及库存量
+                current_supply_vol=trading_sql.first()
+                current_supply_vol=current_supply_vol[0]       #取出查询出的可供给量对象的第一个元素，就是库存量    
+                trading_sql=select([object.c.cash]).where(object.c.account==current_de_account)
+                trading_sql=connection.execute(trading_sql)   #查询当前需求方的账号及现金量
+                current_demand_cash=trading_sql.first()
+                current_demand_cash=current_demand_cash[0]
+                demand_quantity=int(current_demand_cash/clear_price)  #查询需求方库存现金能够购买的量
+              
+                current_trading_vol=min(current_demand,current_supply_vol,demand_quantity)  
+                current_stock_value=clear_price*current_trading_vol    #交易价值取当前需求量、需求方现金能力和供给方库存量的较小值
+               
+                #操作供给方账户，减少股票，增加现金  
+                supply_update=update(object).where(object.c.account==current_su_account)
+                #在交易者表中股票库存量中减去交易量
+                supply_stock_update=supply_update.values(stock1=(object.c.stock1-current_trading_vol))  
+                update_stock_supply=connection.execute(supply_stock_update)                       #执行交易语句，写入数据库
+                #supply_update=update(object).where(object.c.account==current_su_account)
+                supply_cash_update=supply_update.values(cash=(object.c.cash+current_stock_value))    #出售股票，现金增加
+                update_cash_supply=connection.execute(supply_cash_update)                       #执行交易语句，写入数据库
+
+                #操作需求方账户，减少现金，增加股票
+                demand_update=update(object).where(object.c.account==current_de_account)
+                demand_cash_update=demand_update.values(cash=(object.c.cash-current_stock_value))    #买入股票，现金减少
+                update_cash_demand=connection.execute(demand_cash_update)                       #执行交易语句，写入数据库
+                #demand_update=update(object).where(object.c.account==current_de_account)
+                #在交易者表中股票库存量中减去交易量
+                demand_stock_update=demand_update.values(stock1=(object.c.stock1+current_trading_vol))  
+                update_stock_demand=connection.execute(demand_stock_update)                       #执行交易语句，写入数据库
+                
+                current_supply-=current_demand
+                trading_volume+=current_demand
+                actual_vol+=current_trading_vol     #累计实际交易量
+                demand_index+=1
+                current_demand=sorted_demand[supply_index][2]
+                
+            else  :#最后一种情况，供给需求恰好相等，查询供给方当前股票库存量，需求方现金量，计算更新供给方和需求方数据库
+                trading_sql=select([object.c.stock1]).where(object.c.account==current_su_account)
+                trading_sql=connection.execute(trading_sql)    #查询当前供给方的账号及库存量
+                current_supply_vol=trading_sql.first()
+                current_supply_vol=current_supply_vol[0]        #取出查询结果
+                trading_sql=select([object.c.cash]).where(object.c.account==current_de_account)
+                trading_sql=connection.execute(trading_sql)   #查询当前需求方的账号及现金量
+                current_demand_cash=trading_sql.first()
+                current_demand_cash=current_demand_cash[0]
+                demand_quantity=int(current_demand_cash/clear_price)  #查询需求方库存现金能够购买的量并向下取整
+              
+                current_trading_vol=min(current_supply,current_supply_vol,demand_quantity)  
+                current_stock_value=clear_price*current_trading_vol    #交易价值取当前供给量、需求方现金能力和库存量的较小值
+               
+                #操作供给方账户，减少股票，增加现金  
+                supply_update=update(object).where(object.c.account==current_su_account)
+                 #在交易者表中股票库存量中减去交易量
+                supply_stock_update=supply_update.values(stock1=(object.c.stock1-current_trading_vol)) 
+                update_stock_supply=connection.execute(supply_stock_update)                       #执行交易语句，写入数据库
+                #supply_update=update(object).where(object.c.account==current_su_account)
+                supply_cash_update=supply_update.values(cash=(object.c.cash+current_stock_value))    #出售股票，现金增加
+                update_cash_supply=connection.execute(supply_cash_update)                       #执行交易语句，写入数据库
+
+                #操作需求方账户，减少现金，增加股票
+                demand_update=update(object).where(object.c.account==current_de_account)
+                demand_cash_update=demand_update.values(cash=(object.c.cash-current_stock_value))    #买入股票，现金减少
+                update_cash_demand=connection.execute(demand_cash_update)                       #执行交易语句，写入数据库
+                #demand_update=update(object).where(object.c.account==current_de_account)
+                #在交易者表中股票库存量中减去交易量
+                demand_stock_update=demand_update.values(stock1=(object.c.stock1+current_trading_vol))  
+                update_stock_demand=connection.execute(demand_stock_update)                       #执行交易语句，写入数据库
+                
+                
+                trading_volume+=current_demand
+                actual_vol+=current_trading_vol     #累计实际交易量
+                demand_index-=1
+                supply_index+=1
+                current_supply=sorted_supply[supply_index][2]
+                current_demand=sorted_demand[demand_index][2]      
+            return actual_vol
+
+        #     def update_record(self,object,type):
+        #         update_record=object(
+        #         )
+
+
+
+#定义股票的数据库接口类
+def createStockTable(tablename):
+    stock_table=Table(tablename,metadata,
+                      Column('id', Integer,primary_key=True),
+                      Column('stockType', String(2),nullable=False),   #股票类型，包括高风险‘hr’，低风险'lr'，普通风险'cr'三类
+                      Column('discountFactor', Float,nullable=False),  #要求的回报率
+                      Column('expectPrice', Float,nullable=True),      #预期价格
+                      Column('marketPrice', Float,nullable=True),      #市场实际成交价格
+                      Column('timetag', Integer,nullable=False),       #记录时间
+                      Column('Volume', Integer,nullable=True),         #当期交易量
+                      Column('returnRate', Float,nullable=True),       #记录当期回报率，为统计分析做准备
+                      Column('divdend',Float,nullable=True),           #当期实际分红
+                      Column('div_growthrate', Float,nullable=True),   #红利增长率
+                      Column('blank', Float,nullable=True),            #预留的空白栏
+                      Column('comment', String(500),nullable=True))    #备用的注释栏
+    return stock_table
+    
+class  stockdb_operation(object):
+    def __init__(self,object):
+        current_time=time
+        #Session=sessionmaker(bind=engine)
+        #self.session=Session()
+        
+    def add_record(self,object,type,current_time):    #risklevel='cr'
+        print('the discount rate and div growthrate of stock is:',type.discountRate,type.divdend_growthrate)
+        print('the current time is :',current_time)
+        add_stock_sql=object.insert()
+        new_stock_record=connection.execute(add_stock_sql,
+                                stockType='cr',
+                                discountFactor=type.discountRate,
+                                div_growthrate=type.divdend_growthrate,   
+                                timetag=current_time
+                                  )
+                                                   
+#         self.session.add(new_stock_record)
+#         self.session.commit()
+        return new_stock_record  
+    
+     
+    # def delete_record(self,type):
+      
+        
+#以下为初始化程序部分，time=0，创建股票表，创建交易者表，并写入初始记录。
+#初始化股票
+market_discount_rate=[]
+market_discount_rate.append(0.92)
+
+#生成一只股票并将其写入数据库的表中
+stock_first=stock(market_discount_rate[time],1.0,0.04)   #初始红利是1.0，红利增长率是0.04
+rational_expectation_price=[]#理性预期价格是一个数组，记录t时刻的价格序列
+initial_price=55.0
+rational_expectation_price.append(initial_price)
+#print(type(stock_first),stock_first)
+stock_table1=createStockTable('stock1')
+metadata.create_all(engine)                 #创建新表,股票表
+
+stock_obj=stockdb_operation(stock_table1)   #创建股票表对象，stock_obj实际上应该是stock_table_obj,有两个作用
+                                            #一个是创建一个新表，将表写入数据库，另一作用是创建表对象的实例，进行读写操作
+newstockrecord=stock_obj.add_record(stock_table1,stock_first,time)  #将股票数据写入数据库
+
+#股票数据其他字段补齐，初始化完成
+#connection=engine.connect()
+sql=update(stock_table1).where(stock_table1.c.id==1)
+sql=sql.values(expectPrice=55.0,marketPrice=55.0,Volume=1000000, returnRate=0.08, divdend=1.0)
+update_stock=connection.execute(sql)
+
+#生成交易者对象，并创建交易者表
+trader_table_name='trader_time'+str(time)
+mytable=CreateTradertable(trader_table_name)
+
+metadata.create_all(engine)                 #创建新表,交易者表
+trader_obj=traderdb_operation(mytable)     #创建交易者表对象，trader_obj实际上应该是trader_table_obj,操作交易者数据库
+
+traderlist=trader_generate(tradernumber)   #生成交易者对象
+                 
+for i in range(tradernumber):
+    new_record=trader_obj.add_record(mytable,traderlist[i])    #将交易者个体特征写入数据库
+
+#形成价格预期，并生成供给和需求列表
+stock_first_price=[]
+stock_first_price.append(55.0)
+
+# connection=engine.connect()
+# sql=update(stock1).where(stock1.c.id==1)
+# sql=sql.values(expectPrice=50.0,marketPrice=50.0,Volume=1000000, returnRate=0.08, divdend=1.0)
+# update_stock=connection.execute(sql)
+
+#以下开始循环进行交易
+#for time in range(1,time_length):
+while time<time_length-1:
+    time+=1     #时间加一，循环
+    market_discount_rate.append(1-(market_riskfree_rate_serial[time]+market_risk_premium_serial[time]))
+    print('market discount rate at time',time,'is:',market_discount_rate[time])
+
+    last_divdends_sql=select([stock_table1.c.divdend]).where(stock_table1.c.timetag==(time-1))
+    last_divdends_sql=connection.execute(last_divdends_sql)   #查询上期红利，生成本期红利
+    last_divdends=last_divdends_sql.first()
+    last_divdends=last_divdends[0]                             #取出上期红利
+    last_price=stock_first_price[time-1]                       #记录上期价格
+    uplimit_price=last_price*1.2
+    downlimit_price=last_price*1.2
+    print('the last divdends and the type of it is:',last_divdends,type(last_divdends))
+    current_divdends=last_divdends*(1+DivGrowthRate+random.uniform(-0.03,0.03))  #随机生成本期红利
+
+    stock_first=stock(market_discount_rate[time],current_divdends,DivGrowthRate) 
+
+    newstockrecord=stock_obj.add_record(stock_table1,stock_first,time)  #将该时刻的股票数据写入股票表中，增加一行
+
+#读出上一时间trader数据库全部内容
+    trader_select=mytable.select()
+    trader_execute=connection.execute(trader_select)
+    results=trader_execute.fetchall()
+    #print('the traderlist is:',results) 
+                 
+    #生成交易者对象，并创建新的交易者表
+    trader_table_name='trader_time'+str(time)
+    mytable2=CreateTradertable(trader_table_name)
+    metadata.create_all(engine)                 #创建新表,交易者表
+    trader_obj2=traderdb_operation(mytable2)     #创建交易者表对象，trader_obj实际上应该是trader_table_obj,操作交易者数据库
+
+   #将交易者数据库的上一期内容移入到本期
+    for traders in results:
+        ins=mytable2.insert()         
+        trader_copied=connection.execute(ins,account=traders[1],
+                                      traderType=traders[2],
+                                      riskattitude=traders[3],
+                                      expectPrice=traders[4],
+                                      cash=traders[5],
+                                      stock1=traders[6],
+                                      dis_factor=traders[7])     
+                 
+    stock_first.divdends_forming(current_divdends)    #形成股票红利序列预期
+    current_stock_price=stock_first.calculate_rationalExpectationPrice(current_divdends)
+    rational_expectation_price.append(current_stock_price)
+
+    print('current expect price is:',rational_expectation_price[time])
+    print('stock_price at last time',time-1,'is',stock_first_price[time-1])
+    # print('stock_price at time',time,'is',stock_first_price[time])
+
+    #更新trader对象，对trader的现金，股票重新赋值
+    demand_list=[]
+    supply_list=[]
+    for i in range(tradernumber):
+        traderlist[i].cash=results[i][5]
+        traderlist[i].stock1=results[i][6]     #将期末现金和股票余额更新一遍
+    for i in range(tradernumber):
+        traderlist[i].expectation_forming(stock_first)        #对股票形成价格预期 
+        traderlist[i].demand_forming(last_price)             #依据价格预期对比上期价格形成需求或者供给预期
+        if traderlist[i].demand_supply_tag=='d':              #如果供需标签是d的话，将账号，需求量等信息加入二维表demand_list中
+            trader_demand=[traderlist[i].account_number,traderlist[i].demand_supply_price,traderlist[i].demand_supply_quantity]
+            demand_list.append(trader_demand)
+        elif traderlist[i].demand_supply_tag=='s':           #如果供需标签是d的话，将账号，需求量等信息加入二维表supply_list中
+            trader_supply=[traderlist[i].account_number,traderlist[i].demand_supply_price,traderlist[i].demand_supply_quantity]
+            supply_list.append(trader_supply)
+        else:
+            pass
+
+    #print('the demand list is',demand_list)
+    #print('the supply list is',supply_list)
+
+    demand_price=[demand[1] for demand in demand_list]
+    supply_price=[supply[1] for supply in supply_list]       #取出供给和需求列表中第二列记录供需价格列，为下一步形成出清价格做准备
+    print('demand price list is:',demand_price)
+    print('supply price list is:',supply_price)
+
+    if supply_price:        #如果供给方非空则记录最大最小供给价格
+        supply_min=float(np.amin(supply_price))        #记录最大供需价格和最小供需价格
+        supply_max=float(np.amax(supply_price))
+    else:
+        supply_min=uplimit_price
+        supply_max=uplimit_price+0.1
+    if demand_price:    #如果需求方非空，则记录最大最小需求价格
+        demand_max=float(np.amax(demand_price))                        #记录最大供需价格和最小供需价格
+        demand_min=float(np.amin(demand_price))
+    else:
+        demand_max=downlimit_price+0.1
+        demand_min=downlimit_price
+
+    clear_volume=0                                          
+    if supply_min > demand_max:                            #如果最小供给价格大于最小需求价格，则成交量为零
+        clear_price=demand_max                             #市场价格设置为跌停价格，类似于跌停    
+    elif supply_max<demand_min:                           #反之，如果最小需求价格大于最大供给价格，成交量为零
+        clear_price=supply_max                             #市场价格设置为涨停价格，类似于涨停
+    else:                                                 #否则执行匹配供需函数，形成市场出清价格
+        clear_price,clear_volume,sorted_demand,sorted_supply=match_demand(demand_list,supply_list)
+   
+    clear_price=float(clear_price)      #转换数据类型，避免写入数据库时出错
+    #交易者生成需求和供给并写入数据库
+    print('current clear price and volume is:',clear_price,clear_volume)
+    if supply_price and demand_price:          #如果供给和需求都非空的话执行交易
+        print('execute trading')
+        clear_volume=trader_obj2.trading(clear_price,clear_volume,sorted_demand,sorted_supply,mytable2)
+    elif len(supply_price)==0:                 #否则如果供给为空，则在当期股票交易表中记录无供给，涨停
+        print('no supply,update stock table')
+        update_sql=update(stock_table1).where(stock_table1.c.timetag==time)
+        update_sql=update_sql.values(comment='reach up limit,No supply in current period')
+        updated=connection.execute(update_sql)
+    else:
+        print('no demand,update stock table')
+        update_sql=update(stock_table1).where(stock_table1.c.timetag==time)
+        update_sql=update_sql.values(comment='reach down limit,no demand in current period')
+        updated=connection.execute(update_sql)
+
+    mytable=mytable2             #本期的新表是下一期的旧表    
+    #trader_obj=trader_obj2     #本期的新表是下一期的旧表
+    current_stock_price=clear_price
+    stock_first_price.append(current_stock_price)   #记录当期股票市场价格并加入股票价格列表                 
+    update_stocktable=update(stock_table1).where(stock_table1.c.timetag==time)
+    update_stocktable=update_stocktable.values(expectPrice=current_stock_price,
+                                               marketPrice=clear_price,
+                                               Volume=clear_volume,
+                                               divdend=current_divdends)
+    updated_sql=connection.execute(update_stocktable)      #将本期变化写入股票数据库中
+    #Base.metadata.drop_all(engine)    #删除所有的表
+
+terminal_time=datetime.datetime.now()
+running_time=terminal_time-start_time
+print("running time is:",running_time)
